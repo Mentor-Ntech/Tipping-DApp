@@ -16,7 +16,7 @@ export default function Header() {
 
   return (
     <nav className="bg-colors-primary border-b border-black h-16 flex items-center justify-between px-4">
-      <span className="text-xl font-bold text-black">CeloKudos</span>
+      <span className="text-xl font-bold text-black">CeloKudos 🎉</span>
       {!hideConnectBtn && (
         <ConnectButton
           showBalance={{
