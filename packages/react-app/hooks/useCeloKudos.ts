@@ -9,9 +9,10 @@ import {
 } from 'wagmi';
 import { parseEther, formatEther } from 'viem';
 import celoKudosAbi from '../abi/CeloKudos.json';
+import cusdAbi from '../contexts/cusd-abi.json';
 
-// Contract address - you'll need to replace this with your deployed contract address
-const CELO_KUDOS_CONTRACT_ADDRESS = '0x8f15a99c6D6Ac062782fE7489FE57Ecd2e236042'; // Replace with actual address
+const CELO_KUDOS_CONTRACT_ADDRESS = '0x8f15a99c6D6Ac062782fE7489FE57Ecd2e236042'
+const CUSD_TOKEN_ADDRESS = '0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1';
 
 // Types
 export interface Kudos {
@@ -49,25 +50,49 @@ export function useCeloKudos() {
   // Contract configuration
   const contractConfig = useMemo(() => ({
     address: CELO_KUDOS_CONTRACT_ADDRESS as `0x${string}`,
-    abi: celoKudosAbi.abi,
+    abi: celoKudosAbi,
   }), []);
 
-  // Write contract hook
-  const { 
-    data: writeData, 
-    writeContract, 
+  // cUSD contract config
+  const cusdConfig = useMemo(() => ({
+    address: CUSD_TOKEN_ADDRESS as `0x${string}`,
+    abi: cusdAbi.abi,
+  }), []);
+
+  // Write contract hooks
+  const {
+    data: writeData,
+    writeContract,
     isPending: isWritePending,
     error: writeError,
     reset: resetWrite
   } = useWriteContract();
 
+  // For approval
+  const {
+    data: approveData,
+    writeContract: writeApprove,
+    isPending: isApprovePending,
+    error: approveError,
+    reset: resetApprove
+  } = useWriteContract();
+
   // Wait for transaction receipt
-  const { 
-    isLoading: isConfirming, 
+  const {
+    isLoading: isConfirming,
     isSuccess: isConfirmed,
-    error: confirmError 
+    error: confirmError
   } = useWaitForTransactionReceipt({
     hash: writeData,
+  });
+
+  // Wait for approval receipt
+  const {
+    isLoading: isApproveConfirming,
+    isSuccess: isApproveConfirmed,
+    error: approveConfirmError
+  } = useWaitForTransactionReceipt({
+    hash: approveData,
   });
 
   // Read contract functions
@@ -91,33 +116,60 @@ export function useCeloKudos() {
   });
 
   // Send kudos function
-  const sendKudos = useCallback(async (params: SendKudosParams) => {
+  const sendKudos = useCallback(async (params: SendKudosParams, statusCallback?: (msg: string) => void) => {
     if (!isConnected || !address) {
       throw new Error('Wallet not connected');
     }
 
     const { recipient, amount, message, isPublic } = params;
-    
-    // Validate inputs
     if (!recipient || !amount || !message) {
       throw new Error('Missing required parameters');
     }
-
     if (recipient === address) {
       throw new Error('Cannot send kudos to yourself');
     }
-
-    // Convert amount to wei
     const amountInWei = parseEther(amount);
 
+    // 1. Check allowance
+    let allowance: bigint = 0n;
+    try {
+      if ((window as any).wagmi?.getPublicClient) {
+        allowance = await (window as any).wagmi.getPublicClient().readContract({
+          address: CUSD_TOKEN_ADDRESS,
+          abi: cusdAbi.abi,
+          functionName: 'allowance',
+          args: [address, CELO_KUDOS_CONTRACT_ADDRESS],
+        });
+      }
+    } catch (e) {
+      allowance = 0n;
+    }
+    if (allowance < amountInWei) {
+      statusCallback?.('🔑 Approving cUSD for Kudos contract...');
+      try {
+        await writeContract({
+          address: CUSD_TOKEN_ADDRESS,
+          abi: cusdAbi.abi,
+          functionName: 'approve',
+          args: [CELO_KUDOS_CONTRACT_ADDRESS, amountInWei],
+        });
+        // Optionally, wait for confirmation here
+      } catch (err) {
+        statusCallback?.('❌ Approval failed');
+        throw new Error('Approval failed');
+      }
+    }
+    // 2. Send kudos
+    statusCallback?.('⏳ Sending kudos...');
     try {
       await writeContract({
         ...contractConfig,
         functionName: 'sendKudos',
         args: [recipient, amountInWei, message, isPublic],
       });
+      statusCallback?.('✅ Kudos sent!');
     } catch (error) {
-      console.error('Error sending kudos:', error);
+      statusCallback?.('❌ Failed to send kudos');
       throw error;
     }
   }, [isConnected, address, writeContract, contractConfig]);
@@ -219,11 +271,10 @@ export function useCeloKudos() {
 
     // Write functions
     sendKudos,
-    isWritePending,
+    isWritePending: isWritePending || isApprovePending || isApproveConfirming,
     isConfirming,
     isConfirmed,
-    writeError,
-    confirmError,
+    writeError: writeError || approveError || approveConfirmError,
     resetWrite,
 
     // Read functions
@@ -273,7 +324,7 @@ export function useKudosById(kudosId: bigint) {
   
   const { data: kudos, isLoading, error } = useReadContract({
     address: contractAddress as `0x${string}`,
-    abi: celoKudosAbi.abi,
+    abi: celoKudosAbi,
     functionName: 'getKudosById',
     args: [kudosId],
   });
@@ -291,7 +342,7 @@ export function useUserKudos(userAddress: string, type: 'sent' | 'received', pag
   
   const { data: kudosIds, isLoading, error } = useReadContract({
     address: contractAddress as `0x${string}`,
-    abi: celoKudosAbi.abi,
+    abi: celoKudosAbi,
     functionName: type === 'sent' ? 'getKudosSent' : 'getKudosReceived',
     args: [userAddress, BigInt(page * limit), BigInt(limit)],
   });
@@ -300,7 +351,7 @@ export function useUserKudos(userAddress: string, type: 'sent' | 'received', pag
   const { data: kudosData } = useReadContracts({
     contracts: (kudosIds as bigint[] || []).map(id => ({
       address: contractAddress as `0x${string}`,
-      abi: celoKudosAbi.abi,
+      abi: celoKudosAbi,
       functionName: 'getKudosById',
       args: [id],
     })) as any,
@@ -320,7 +371,7 @@ export function usePublicKudosFeed(page: number = 0, limit: number = 10) {
   
   const { data: kudosIds, isLoading, error } = useReadContract({
     address: contractAddress as `0x${string}`,
-    abi: celoKudosAbi.abi,
+    abi: celoKudosAbi,
     functionName: 'getPublicKudos',
     args: [BigInt(page * limit), BigInt(limit)],
   });
@@ -329,7 +380,7 @@ export function usePublicKudosFeed(page: number = 0, limit: number = 10) {
   const { data: kudosData } = useReadContracts({
     contracts: (kudosIds as bigint[] || []).map(id => ({
       address: contractAddress as `0x${string}`,
-      abi: celoKudosAbi.abi,
+      abi: celoKudosAbi,
       functionName: 'getKudosById',
       args: [id],
     })) as any,
